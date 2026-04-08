@@ -1,6 +1,6 @@
 /** Robust RTF-to-HTML converter for SAS RTF output.
- *  Handles tables, borders, cell backgrounds, alignment, embedded PNG images,
- *  fonts, colors, bold/italic/underline, superscript, line breaks, page breaks.
+ *  Handles tables with colspan, borders, cell backgrounds, alignment,
+ *  embedded PNG/JPEG images, fonts, colors, formatting, page breaks.
  */
 
 interface RtfState {
@@ -32,13 +32,18 @@ interface CellDef {
 function defaultState(): RtfState {
   return { bold: false, italic: false, underline: false, strike: false, fontSize: 20, fontIndex: 0, foreColor: 0, backColor: 0, superscript: false, subscript: false, align: 'left' };
 }
-
 function cloneState(s: RtfState): RtfState { return { ...s }; }
 
 export function rtfToHtml(rtf: string): string {
   const fonts = parseFontTable(rtf);
   const colors = parseColorTable(rtf);
   const tokens = tokenize(rtf);
+
+  // Two-pass approach: first collect row info for colspan, then render
+  const rowInfos = collectRowInfo(tokens);
+
+  // Find max columns across all rows in each table
+  const maxCols = computeMaxCols(rowInfos);
 
   const stateStack: RtfState[] = [];
   let state = defaultState();
@@ -52,8 +57,9 @@ export function rtfToHtml(rtf: string): string {
   let pictData = '';
   let pictProps = { width: 0, height: 0, type: 'png' };
   let pendingCellBorders: Partial<CellDef> = {};
+  let rowCounter = 0;
+  let tableStartRow = 0;
 
-  // Track which groups to skip
   const skipStarts = new Set(['header', 'footer', 'headerl', 'headerr', 'footerl', 'footerr', 'info', 'stylesheet', 'fonttbl', 'colortbl']);
 
   for (let i = 0; i < tokens.length; i++) {
@@ -63,27 +69,21 @@ export function rtfToHtml(rtf: string): string {
       groupDepth++;
       stateStack.push(cloneState(state));
       if (skipDepth > 0) { skipDepth++; continue; }
-      // Check if next token starts a skip group
       if (i + 1 < tokens.length) {
         const next = tokens[i + 1];
         if (next === '\\*') {
-          // \* destination group — check what follows
           if (i + 2 < tokens.length) {
             const dest = tokens[i + 2];
             const m = dest.match(/^\\([a-z]+)/);
-            if (m && (skipStarts.has(m[1]) || m[1] === 'bkmkstart' || m[1] === 'bkmkend' || m[1] === 'ud')) {
-              // But NOT shppict — we need that for images
-              if (m[1] !== 'shppict') {
-                skipDepth = 1; continue;
-              }
+            if (m && (skipStarts.has(m[1]) || m[1] === 'bkmkstart' || m[1] === 'bkmkend' || m[1] === 'ud' || m[1] === 'fldinst')) {
+              if (m[1] !== 'shppict') { skipDepth = 1; continue; }
             }
           }
           continue;
         }
+        // Skip \field groups except shppict
         const cwm = next.match(/^\\([a-z]+)/);
-        if (cwm && skipStarts.has(cwm[1])) {
-          skipDepth = 1; continue;
-        }
+        if (cwm && skipStarts.has(cwm[1])) { skipDepth = 1; continue; }
       }
       continue;
     }
@@ -92,9 +92,15 @@ export function rtfToHtml(rtf: string): string {
       groupDepth--;
       if (skipDepth > 0) { skipDepth--; state = stateStack.pop() || defaultState(); continue; }
       if (inPict) {
-        // End of pict group — emit image
         inPict = false;
         if (pictData.length > 0) {
+          // Ensure we're in a cell if in a table
+          if (inTable && !inCell) {
+            if (!inRow) { html += '<tr>'; inRow = true; }
+            const colspan = getColspan(cellDefs, cellIndex, maxCols.get(tableStartRow) || 1);
+            html += buildTdOpen(cellDefs, cellIndex, state, colors, colspan);
+            inCell = true;
+          }
           const b64 = hexToBase64(pictData.trim());
           const mime = pictProps.type === 'jpeg' ? 'image/jpeg' : 'image/png';
           const wIn = pictProps.width > 0 ? pictProps.width / 1440 : 8;
@@ -121,7 +127,6 @@ export function rtfToHtml(rtf: string): string {
           else if (w === 'pichgoal' && p !== undefined) pictProps.height = p;
         }
       } else {
-        // Hex data — strip whitespace
         pictData += tok.replace(/\s/g, '');
       }
       continue;
@@ -130,9 +135,8 @@ export function rtfToHtml(rtf: string): string {
     // Control words
     if (tok.startsWith('\\')) {
       if (tok === '\\*') continue;
-      const cwm = tok.match(/^\\([a-z]+)(-?\d+)?$/);
+      const cwm = tok.match(/^\\([a-zA-Z]+)(-?\d+)?$/);
       if (!cwm) {
-        // Escaped chars
         if (tok === '\\\\') html += '\\';
         else if (tok === '\\{') html += '{';
         else if (tok === '\\}') html += '}';
@@ -147,10 +151,12 @@ export function rtfToHtml(rtf: string): string {
       }
 
       const word = cwm[1];
+      // Skip unknown uppercase control words (e.g. \E from SAS)
+      if (word !== word.toLowerCase()) continue;
+
       const param = cwm[2] !== undefined ? parseInt(cwm[2]) : undefined;
 
       switch (word) {
-        // Formatting
         case 'b': state.bold = param !== 0; break;
         case 'i': state.italic = param !== 0; break;
         case 'ul': case 'ulw': state.underline = true; break;
@@ -163,19 +169,13 @@ export function rtfToHtml(rtf: string): string {
         case 'super': state.superscript = true; state.subscript = false; break;
         case 'sub': state.subscript = true; state.superscript = false; break;
         case 'nosupersub': state.superscript = false; state.subscript = false; break;
-
-        // Alignment
         case 'ql': state.align = 'left'; break;
         case 'qc': state.align = 'center'; break;
         case 'qr': state.align = 'right'; break;
         case 'qj': state.align = 'justify'; break;
-
-        // Paragraph/line
         case 'par': html += '<br>'; break;
         case 'line': html += '<br>'; break;
         case 'tab': html += '&emsp;'; break;
-
-        // Special chars
         case 'lquote': html += '\u2018'; break;
         case 'rquote': html += '\u2019'; break;
         case 'ldblquote': html += '\u201C'; break;
@@ -183,22 +183,14 @@ export function rtfToHtml(rtf: string): string {
         case 'emdash': html += '\u2014'; break;
         case 'endash': html += '\u2013'; break;
         case 'bullet': html += '\u2022'; break;
-
-        // Unicode
         case 'u':
-          if (param !== undefined) {
-            const cp = param < 0 ? param + 65536 : param;
-            html += String.fromCharCode(cp);
-          }
+          if (param !== undefined) html += String.fromCharCode(param < 0 ? param + 65536 : param);
           break;
-
-        // Reset
         case 'pard': state = { ...defaultState(), align: 'left' }; break;
         case 'plain': state = defaultState(); break;
 
-        // Table row start
         case 'trowd':
-          if (!inTable) { html += '<table>'; inTable = true; }
+          if (!inTable) { html += '<table>'; inTable = true; tableStartRow = rowCounter; }
           if (inCell) { html += '</td>'; inCell = false; }
           if (inRow) { html += '</tr>'; }
           cellDefs = [];
@@ -207,7 +199,6 @@ export function rtfToHtml(rtf: string): string {
           inRow = false;
           break;
 
-        // Cell border definitions (before cellx)
         case 'clbrdrt': pendingCellBorders.borderTop = true; break;
         case 'clbrdrb': pendingCellBorders.borderBottom = true; break;
         case 'clbrdrl': pendingCellBorders.borderLeft = true; break;
@@ -219,7 +210,6 @@ export function rtfToHtml(rtf: string): string {
         case 'clvertalb': pendingCellBorders.vertAlign = 'bottom'; break;
         case 'clvertalt': pendingCellBorders.vertAlign = 'top'; break;
 
-        // Cell definition end
         case 'cellx':
           if (param !== undefined) {
             cellDefs.push({
@@ -239,21 +229,19 @@ export function rtfToHtml(rtf: string): string {
 
         case 'intbl': break;
 
-        // Cell content end
         case 'cell':
           if (inCell) { html += '</td>'; inCell = false; }
           cellIndex++;
           break;
 
-        // Row end
         case 'row':
           if (inCell) { html += '</td>'; inCell = false; }
           if (inRow) { html += '</tr>'; }
           inRow = false;
           cellIndex = 0;
+          rowCounter++;
           break;
 
-        // Page break
         case 'page':
           if (inCell) { html += '</td>'; inCell = false; }
           if (inRow) { html += '</tr>'; inRow = false; }
@@ -261,7 +249,6 @@ export function rtfToHtml(rtf: string): string {
           html += '<hr class="page-break">';
           break;
 
-        // Picture
         case 'pict':
           inPict = true;
           pictData = '';
@@ -282,26 +269,8 @@ export function rtfToHtml(rtf: string): string {
     // Start cell if needed
     if (inTable && !inCell) {
       if (!inRow) { html += '<tr>'; inRow = true; }
-      const def = cellDefs[cellIndex];
-      const styles: string[] = [];
-      if (def) {
-        // Width from cellx (convert twips to points, approximate)
-        const prevEdge = cellIndex > 0 ? cellDefs[cellIndex - 1].rightEdge : 0;
-        const widthTwips = def.rightEdge - prevEdge;
-        styles.push(`width:${(widthTwips / 1440).toFixed(2)}in`);
-        // Borders
-        if (def.borderTop) styles.push(`border-top:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
-        if (def.borderBottom) styles.push(`border-bottom:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
-        if (def.borderLeft) styles.push(`border-left:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
-        if (def.borderRight) styles.push(`border-right:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
-        // Background
-        if (def.bgColor > 0 && def.bgColor < colors.length) styles.push(`background-color:${colors[def.bgColor]}`);
-        // Vertical align
-        styles.push(`vertical-align:${def.vertAlign}`);
-      }
-      // Text alignment from state
-      styles.push(`text-align:${state.align}`);
-      html += `<td style="${styles.join(';')}">`;
+      const colspan = getColspan(cellDefs, cellIndex, maxCols.get(tableStartRow) || 1);
+      html += buildTdOpen(cellDefs, cellIndex, state, colors, colspan);
       inCell = true;
     }
 
@@ -337,15 +306,110 @@ export function rtfToHtml(rtf: string): string {
   return html;
 }
 
+/** First pass: collect number of cells per row and group rows into tables */
+interface RowInfo { numCells: number; tableIndex: number; }
+
+function collectRowInfo(tokens: string[]): RowInfo[] {
+  const rows: RowInfo[] = [];
+  let cellCount = 0;
+  let inTableDef = false;
+  let tableIndex = 0;
+  let wasInTable = false;
+  let skipDepth = 0;
+  let groupDepth = 0;
+  const skipStarts = new Set(['header', 'footer', 'headerl', 'headerr', 'footerl', 'footerr', 'info', 'stylesheet', 'fonttbl', 'colortbl']);
+
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (tok === '{') {
+      groupDepth++;
+      if (skipDepth > 0) { skipDepth++; continue; }
+      if (i + 1 < tokens.length) {
+        const next = tokens[i + 1];
+        if (next === '\\*') {
+          if (i + 2 < tokens.length) {
+            const dest = tokens[i + 2];
+            const m = dest.match(/^\\([a-z]+)/);
+            if (m && (skipStarts.has(m[1]) || m[1] === 'bkmkstart' || m[1] === 'bkmkend' || m[1] === 'ud' || m[1] === 'fldinst') && m[1] !== 'shppict') {
+              skipDepth = 1;
+            }
+          }
+          continue;
+        }
+        const cwm = next.match(/^\\([a-z]+)/);
+        if (cwm && skipStarts.has(cwm[1])) { skipDepth = 1; }
+      }
+      continue;
+    }
+    if (tok === '}') { groupDepth--; if (skipDepth > 0) skipDepth--; continue; }
+    if (skipDepth > 0) continue;
+
+    const cwm = tok.match(/^\\([a-z]+)(-?\d+)?$/);
+    if (!cwm) continue;
+    const word = cwm[1];
+    const param = cwm[2] !== undefined ? parseInt(cwm[2]) : undefined;
+
+    if (word === 'trowd') {
+      if (!wasInTable) { tableIndex = rows.length; wasInTable = true; }
+      cellCount = 0;
+      inTableDef = true;
+    } else if (word === 'cellx') {
+      cellCount++;
+    } else if (word === 'row') {
+      rows.push({ numCells: cellCount, tableIndex });
+      inTableDef = false;
+    } else if (word === 'page') {
+      wasInTable = false;
+    }
+  }
+  return rows;
+}
+
+/** Compute max columns per table (keyed by first row index of that table) */
+function computeMaxCols(rowInfos: RowInfo[]): Map<number, number> {
+  const tableMaxCols = new Map<number, number>();
+  for (const ri of rowInfos) {
+    const cur = tableMaxCols.get(ri.tableIndex) || 0;
+    if (ri.numCells > cur) tableMaxCols.set(ri.tableIndex, ri.numCells);
+  }
+  return tableMaxCols;
+}
+
+function getColspan(cellDefs: CellDef[], cellIndex: number, maxCols: number): number {
+  if (cellDefs.length >= maxCols || cellDefs.length <= 1) return cellIndex === 0 && cellDefs.length < maxCols && cellDefs.length === 1 ? maxCols : 1;
+  // Only apply colspan to the last cell if row has fewer cells than max
+  if (cellIndex === cellDefs.length - 1 && cellDefs.length < maxCols) {
+    return maxCols - cellDefs.length + 1;
+  }
+  return 1;
+}
+
+function buildTdOpen(cellDefs: CellDef[], cellIndex: number, state: RtfState, colors: string[], colspan: number): string {
+  const def = cellDefs[cellIndex];
+  const styles: string[] = [];
+  if (def) {
+    const prevEdge = cellIndex > 0 ? cellDefs[cellIndex - 1].rightEdge : 0;
+    const widthTwips = def.rightEdge - prevEdge;
+    if (colspan <= 1) styles.push(`width:${(widthTwips / 1440).toFixed(2)}in`);
+    if (def.borderTop) styles.push(`border-top:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
+    if (def.borderBottom) styles.push(`border-bottom:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
+    if (def.borderLeft) styles.push(`border-left:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
+    if (def.borderRight) styles.push(`border-right:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
+    if (def.bgColor > 0 && def.bgColor < colors.length) styles.push(`background-color:${colors[def.bgColor]}`);
+    styles.push(`vertical-align:${def.vertAlign}`);
+  }
+  styles.push(`text-align:${state.align}`);
+  const colspanAttr = colspan > 1 ? ` colspan="${colspan}"` : '';
+  return `<td${colspanAttr} style="${styles.join(';')}">`;
+}
+
 function parseFontTable(rtf: string): Map<number, string> {
   const fonts = new Map<number, string>();
   const m = rtf.match(/\{\\fonttbl([\s\S]*?)\}/);
   if (m) {
     const re = /\{\\f(\d+)[^}]*\s([^;{}]+);/g;
     let fm: RegExpExecArray | null;
-    while ((fm = re.exec(m[1]))) {
-      fonts.set(parseInt(fm[1]), fm[2].trim());
-    }
+    while ((fm = re.exec(m[1]))) fonts.set(parseInt(fm[1]), fm[2].trim());
   }
   return fonts;
 }
@@ -380,9 +444,9 @@ function tokenize(rtf: string): string[] {
         if (next === '*') { tokens.push('\\*'); i += 2; continue; }
         if (next === "'") { tokens.push("\\'" + rtf.substring(i + 2, i + 4)); i += 4; continue; }
         if (next === '\n' || next === '\r') { tokens.push('\\par'); i += 2; if (i < len && rtf[i] === '\n') i++; continue; }
-        if (/[a-z]/i.test(next)) {
+        if (/[a-zA-Z]/.test(next)) {
           let j = i + 1;
-          while (j < len && /[a-z]/i.test(rtf[j])) j++;
+          while (j < len && /[a-zA-Z]/.test(rtf[j])) j++;
           let k = j;
           if (k < len && (rtf[k] === '-' || /\d/.test(rtf[k]))) {
             if (rtf[k] === '-') k++;
@@ -407,17 +471,12 @@ function tokenize(rtf: string): string[] {
 }
 
 function hexToBase64(hex: string): string {
-  // Convert hex string to base64
   const bytes: number[] = [];
   for (let i = 0; i < hex.length; i += 2) {
     const b = parseInt(hex.substring(i, i + 2), 16);
     if (!isNaN(b)) bytes.push(b);
   }
-  // Use Buffer in Node.js
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(bytes).toString('base64');
-  }
-  // Fallback for browser
+  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
   let binary = '';
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary);
