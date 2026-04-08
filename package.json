@@ -3,7 +3,7 @@
   "displayName": "RTF Preview",
   "description": "Lightweight RTF file previewer",
   "version": "0.2.0",
-  "publisher": "YOUR_PUBLISHER_ID",
+  "publisher": "tina-zhai",
   "repository": {
     "type": "git",
     "url": "https://github.com/tinazhai/rtf_preview"
