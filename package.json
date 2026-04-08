@@ -1,0 +1,75 @@
+{
+  "name": "rtf-preview",
+  "displayName": "RTF Preview",
+  "description": "Lightweight RTF file previewer",
+  "version": "0.2.0",
+  "publisher": "YOUR_PUBLISHER_ID",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tinazhai/rtf_preview"
+  },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "rtf",
+    "preview",
+    "rich text",
+    "SAS"
+  ],
+  "activationEvents": [
+    "onLanguage:rtf"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "rtfPreview.open",
+        "title": "RTF: Open Preview",
+        "icon": "$(open-preview)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "when": "resourceExtname == .rtf",
+          "command": "rtfPreview.open",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "when": "resourceExtname == .rtf",
+          "command": "rtfPreview.open",
+          "group": "navigation"
+        }
+      ]
+    },
+    "languages": [
+      {
+        "id": "rtf",
+        "extensions": [
+          ".rtf"
+        ],
+        "aliases": [
+          "RTF",
+          "Rich Text Format"
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.7.1",
+    "typescript": "^5.0.0"
+  }
+}
