@@ -2,7 +2,7 @@
   "name": "rtf-preview",
   "displayName": "RTF Live Preview",
   "description": "Preview RTF files with tables, images, and formatting. Works standalone with built-in parser; enhanced rendering with LibreOffice or pandoc.",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "publisher": "tina-zhai",
   "repository": {
     "type": "git",

@@ -80,8 +80,10 @@ export function rtfToHtml(rtf: string): string {
   let rowCounter = 0;
   let tableStartRow = 0;
   let inMergedCell = false;
+  let intbl = false;
 
-  const skipStarts = new Set(['header', 'footer', 'headerl', 'headerr', 'footerl', 'footerr', 'info', 'stylesheet', 'fonttbl', 'colortbl']);
+  const skipStarts = new Set(['header', 'footer', 'headerl', 'headerr', 'footerl', 'footerr', 'headerf',
+    'info', 'stylesheet', 'fonttbl', 'colortbl']);
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
@@ -96,13 +98,12 @@ export function rtfToHtml(rtf: string): string {
           if (i + 2 < tokens.length) {
             const dest = tokens[i + 2];
             const m = dest.match(/^\\([a-z]+)/);
-            if (m && (skipStarts.has(m[1]) || m[1] === 'bkmkstart' || m[1] === 'bkmkend' || m[1] === 'ud' || m[1] === 'fldinst')) {
-              if (m[1] !== 'shppict') { skipDepth = 1; continue; }
-            }
+            // Skip all \* destinations except shppict (contains images)
+            if (m && m[1] !== 'shppict') { skipDepth = 1; continue; }
           }
           continue;
         }
-        // Skip \field groups except shppict
+        // Skip known non-\* destination groups
         const cwm = next.match(/^\\([a-z]+)/);
         if (cwm && skipStarts.has(cwm[1])) { skipDepth = 1; continue; }
       }
@@ -196,7 +197,13 @@ export function rtfToHtml(rtf: string): string {
         case 'qc': state.align = 'center'; break;
         case 'qr': state.align = 'right'; break;
         case 'qj': state.align = 'justify'; break;
-        case 'par': html += '<br>'; break;
+        case 'par':
+          if (inTable && !intbl) {
+            if (inCell) { html += '</td>'; inCell = false; }
+            if (inRow) { html += '</tr>'; inRow = false; }
+            html += '</table>'; inTable = false;
+          }
+          html += '<br>'; break;
         case 'line': html += '<br>'; break;
         case 'tab': html += '&emsp;'; break;
         case 'lquote': html += '\u2018'; break;
@@ -209,7 +216,7 @@ export function rtfToHtml(rtf: string): string {
         case 'u':
           if (param !== undefined) html += String.fromCharCode(param < 0 ? param + 65536 : param);
           break;
-        case 'pard': state = { ...defaultState(), align: 'left' }; break;
+        case 'pard': state = { ...defaultState(), align: 'left' }; intbl = false; break;
         case 'plain': state = defaultState(); break;
         case 'li': if (param !== undefined) state.leftIndent = param; break;
         case 'fi': if (param !== undefined) state.firstIndent = param; break;
@@ -316,7 +323,7 @@ export function rtfToHtml(rtf: string): string {
           }
           break;
 
-        case 'intbl': break;
+        case 'intbl': intbl = true; break;
 
         case 'cell':
           // Emit empty cell if cell was never opened
@@ -368,6 +375,14 @@ export function rtfToHtml(rtf: string): string {
     if (tok.trim().length === 0 && !inTable) {
       if (tok.includes(' ')) html += ' ';
       continue;
+    }
+
+    // Close table if we're no longer in intbl mode
+    if (inTable && !intbl) {
+      if (inCell) { html += '</td>'; inCell = false; }
+      if (inRow) { html += '</tr>'; inRow = false; }
+      html += '</table>';
+      inTable = false;
     }
 
     // Suppress text in merged continuation cells
@@ -430,7 +445,8 @@ function collectRowInfo(tokens: string[]): RowInfo[] {
   let wasInTable = false;
   let skipDepth = 0;
   let groupDepth = 0;
-  const skipStarts = new Set(['header', 'footer', 'headerl', 'headerr', 'footerl', 'footerr', 'info', 'stylesheet', 'fonttbl', 'colortbl']);
+  const skipStarts = new Set(['header', 'footer', 'headerl', 'headerr', 'footerl', 'footerr', 'headerf',
+    'info', 'stylesheet', 'fonttbl', 'colortbl']);
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
@@ -443,9 +459,7 @@ function collectRowInfo(tokens: string[]): RowInfo[] {
           if (i + 2 < tokens.length) {
             const dest = tokens[i + 2];
             const m = dest.match(/^\\([a-z]+)/);
-            if (m && (skipStarts.has(m[1]) || m[1] === 'bkmkstart' || m[1] === 'bkmkend' || m[1] === 'ud' || m[1] === 'fldinst') && m[1] !== 'shppict') {
-              skipDepth = 1;
-            }
+            if (m && m[1] !== 'shppict') { skipDepth = 1; }
           }
           continue;
         }
