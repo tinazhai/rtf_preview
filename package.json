@@ -1,6 +1,6 @@
 {
   "name": "rtf-preview",
-  "displayName": "RTF File Preview",
+  "displayName": "RTF Live Preview",
   "description": "Lightweight RTF file previewer",
   "version": "0.2.0",
   "publisher": "tina-zhai",
