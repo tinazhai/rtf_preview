@@ -47,7 +47,15 @@ function openPreview(uri: vscode.Uri) {
 async function renderRtf(uri: vscode.Uri, panel: vscode.WebviewPanel) {
   panel.webview.html = loadingHtml();
 
-  // Try LibreOffice first for best fidelity
+  // Built-in parser first — best for SAS RTF output
+  try {
+    const rtfContent = fs.readFileSync(uri.fsPath, 'latin1');
+    const bodyHtml = rtfToHtml(rtfContent);
+    panel.webview.html = wrapHtml(bodyHtml);
+    return;
+  } catch { /* fall through */ }
+
+  // Fallback: LibreOffice
   const soffice = findBinary(['soffice', 'libreoffice']);
   if (soffice) {
     try {
@@ -57,7 +65,7 @@ async function renderRtf(uri: vscode.Uri, panel: vscode.WebviewPanel) {
     } catch { /* fall through */ }
   }
 
-  // Try pandoc
+  // Fallback: pandoc
   const pandoc = findBinary(['pandoc']);
   if (pandoc) {
     try {
@@ -67,14 +75,7 @@ async function renderRtf(uri: vscode.Uri, panel: vscode.WebviewPanel) {
     } catch { /* fall through */ }
   }
 
-  // Fallback: built-in JS parser
-  try {
-    const rtfContent = fs.readFileSync(uri.fsPath, 'latin1');
-    const bodyHtml = rtfToHtml(rtfContent);
-    panel.webview.html = wrapHtml(bodyHtml);
-  } catch (err: any) {
-    panel.webview.html = errorHtml(err.message);
-  }
+  panel.webview.html = errorHtml('Failed to render RTF file.');
 }
 
 function convertWithLibreOffice(filePath: string, soffice: string): Promise<string> {

@@ -31,9 +31,9 @@ The extension automatically selects the best available renderer:
 
 | Priority | Renderer | Quality | Requirement |
 |----------|----------|---------|-------------|
-| 1 | LibreOffice | Best | `soffice` in PATH |
-| 2 | pandoc | Good | `pandoc` in PATH |
-| 3 | Built-in parser | Good | None (always available) |
+| 1 | Built-in parser | Best for SAS | None (always available) |
+| 2 | LibreOffice | Good | `soffice` in PATH |
+| 3 | pandoc | Good | `pandoc` in PATH |
 
 ## Build from Source
 
