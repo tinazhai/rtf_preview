@@ -129,7 +129,7 @@ function wrapHtml(body: string): string {
 <style>
   body { font-family: 'Times New Roman', serif; font-size: 10pt; margin: 20px; background: #fff; color: #000; }
   table { border-collapse: collapse; margin: 4px auto; }
-  td { padding: 2px 6px; }
+  td { padding: 2px 6px; border: 1px solid #d0d0d0; }
   hr.page-break { border: none; border-top: 2px dashed #999; margin: 20px 0; }
   img { display: block; margin: 8px auto; }
   sup, sub { font-size: 0.7em; }
@@ -142,7 +142,7 @@ function injectStyles(html: string): string {
   const css = `<style>
   body { margin: 20px; background: #fff; color: #000; }
   table { border-collapse: collapse; }
-  td, th { padding: 2px 6px; vertical-align: top; }
+  td, th { padding: 2px 6px; vertical-align: top; border: 1px solid #d0d0d0; }
   img { max-width: 100%; height: auto; }
 </style>`;
   return html.includes('</head>') ? html.replace('</head>', css + '</head>') : css + html;

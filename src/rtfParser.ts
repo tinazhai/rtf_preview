@@ -15,6 +15,8 @@ interface RtfState {
   superscript: boolean;
   subscript: boolean;
   align: string;
+  leftIndent: number;   // \li in twips
+  firstIndent: number;  // \fi in twips
 }
 
 interface CellDef {
@@ -22,15 +24,31 @@ interface CellDef {
   borderBottom: boolean;
   borderLeft: boolean;
   borderRight: boolean;
-  borderWidth: number;
-  borderColor: number;
+  borderTopStyle: string;
+  borderBottomStyle: string;
+  borderLeftStyle: string;
+  borderRightStyle: string;
+  borderTopWidth: number;
+  borderBottomWidth: number;
+  borderLeftWidth: number;
+  borderRightWidth: number;
+  borderTopColor: number;
+  borderBottomColor: number;
+  borderLeftColor: number;
+  borderRightColor: number;
   bgColor: number;
   vertAlign: string;
   rightEdge: number;
+  merged: boolean;       // \clmrg — continuation of horizontal merge
+  mergeFirst: boolean;   // \clmgf — first cell in horizontal merge
+  padTop: number;
+  padRight: number;
+  padBottom: number;
+  padLeft: number;
 }
 
 function defaultState(): RtfState {
-  return { bold: false, italic: false, underline: false, strike: false, fontSize: 20, fontIndex: 0, foreColor: 0, backColor: 0, superscript: false, subscript: false, align: 'left' };
+  return { bold: false, italic: false, underline: false, strike: false, fontSize: 20, fontIndex: 0, foreColor: 0, backColor: 0, superscript: false, subscript: false, align: 'left', leftIndent: 0, firstIndent: 0 };
 }
 function cloneState(s: RtfState): RtfState { return { ...s }; }
 
@@ -42,8 +60,8 @@ export function rtfToHtml(rtf: string): string {
   // Two-pass approach: first collect row info for colspan, then render
   const rowInfos = collectRowInfo(tokens);
 
-  // Find max columns across all rows in each table
-  const maxCols = computeMaxCols(rowInfos);
+  // Build column grids per table for edge-based colspan
+  const { grids: tableGrids, maxCols } = computeTableGrids(rowInfos);
 
   const stateStack: RtfState[] = [];
   let state = defaultState();
@@ -57,8 +75,11 @@ export function rtfToHtml(rtf: string): string {
   let pictData = '';
   let pictProps = { width: 0, height: 0, type: 'png' };
   let pendingCellBorders: Partial<CellDef> = {};
+  // Track which border side we're currently defining
+  let pendingBorderSide: 'top' | 'bottom' | 'left' | 'right' | null = null;
   let rowCounter = 0;
   let tableStartRow = 0;
+  let inMergedCell = false;
 
   const skipStarts = new Set(['header', 'footer', 'headerl', 'headerr', 'footerl', 'footerr', 'info', 'stylesheet', 'fonttbl', 'colortbl']);
 
@@ -97,7 +118,9 @@ export function rtfToHtml(rtf: string): string {
           // Ensure we're in a cell if in a table
           if (inTable && !inCell) {
             if (!inRow) { html += '<tr>'; inRow = true; }
-            const colspan = getColspan(cellDefs, cellIndex, maxCols.get(tableStartRow) || 1);
+            while (cellIndex < cellDefs.length && cellDefs[cellIndex].merged) { cellIndex++; }
+            const grid = tableGrids.get(tableStartRow);
+            const colspan = computeCellColspan(cellDefs, cellIndex, grid);
             html += buildTdOpen(cellDefs, cellIndex, state, colors, colspan);
             inCell = true;
           }
@@ -188,6 +211,16 @@ export function rtfToHtml(rtf: string): string {
           break;
         case 'pard': state = { ...defaultState(), align: 'left' }; break;
         case 'plain': state = defaultState(); break;
+        case 'li': if (param !== undefined) state.leftIndent = param; break;
+        case 'fi': if (param !== undefined) state.firstIndent = param; break;
+        case 'ri': case 'rin0': case 'lin0': break; // right/left indent variants, skip
+        case 'keepn': case 'widctlpar': case 'wrapdefault': case 'faauto': case 'adjustright': case 'itap0': break;
+        case 'trhdr': case 'trqc': case 'trql': case 'trqr': break; // row-level formatting
+        case 'pnhang': break; // hanging indent for numbered paragraphs
+        case 'rtlch': case 'ltrch': case 'loch': case 'hich': case 'dbch': case 'cgrid': break; // charset directives
+        case 'lang': case 'langfe': case 'langnp': case 'langfenp': case 'alang': break; // language
+        case 'af': case 'afs': break; // associated font
+        case 'snext0': case 'sbasedon0': case 'sqformat': case 'spriority0': break; // stylesheet props
 
         case 'trowd':
           if (!inTable) { html += '<table>'; inTable = true; tableStartRow = rowCounter; }
@@ -196,19 +229,58 @@ export function rtfToHtml(rtf: string): string {
           cellDefs = [];
           cellIndex = 0;
           pendingCellBorders = {};
+          pendingBorderSide = null;
           inRow = false;
+          inMergedCell = false;
           break;
 
-        case 'clbrdrt': pendingCellBorders.borderTop = true; break;
-        case 'clbrdrb': pendingCellBorders.borderBottom = true; break;
-        case 'clbrdrl': pendingCellBorders.borderLeft = true; break;
-        case 'clbrdrr': pendingCellBorders.borderRight = true; break;
-        case 'brdrw': if (param !== undefined) pendingCellBorders.borderWidth = param; break;
-        case 'brdrcf': if (param !== undefined) pendingCellBorders.borderColor = param; break;
+        case 'clbrdrt': pendingBorderSide = 'top'; pendingCellBorders.borderTop = true; break;
+        case 'clbrdrb': pendingBorderSide = 'bottom'; pendingCellBorders.borderBottom = true; break;
+        case 'clbrdrl': pendingBorderSide = 'left'; pendingCellBorders.borderLeft = true; break;
+        case 'clbrdrr': pendingBorderSide = 'right'; pendingCellBorders.borderRight = true; break;
+        case 'brdrs': case 'brdrdot': case 'brdrdash': case 'brdrdb': case 'brdrth': case 'brdrsh':
+        case 'brdrnone': {
+          const style = word === 'brdrnone' ? 'none' : word === 'brdrdot' ? 'dotted' : word === 'brdrdash' ? 'dashed' : word === 'brdrdb' ? 'double' : 'solid';
+          if (pendingBorderSide === 'top') pendingCellBorders.borderTopStyle = style;
+          else if (pendingBorderSide === 'bottom') pendingCellBorders.borderBottomStyle = style;
+          else if (pendingBorderSide === 'left') pendingCellBorders.borderLeftStyle = style;
+          else if (pendingBorderSide === 'right') pendingCellBorders.borderRightStyle = style;
+          if (word === 'brdrnone') {
+            if (pendingBorderSide === 'top') pendingCellBorders.borderTop = false;
+            else if (pendingBorderSide === 'bottom') pendingCellBorders.borderBottom = false;
+            else if (pendingBorderSide === 'left') pendingCellBorders.borderLeft = false;
+            else if (pendingBorderSide === 'right') pendingCellBorders.borderRight = false;
+          }
+          break;
+        }
+        case 'brdrw':
+          if (param !== undefined) {
+            if (pendingBorderSide === 'top') pendingCellBorders.borderTopWidth = param;
+            else if (pendingBorderSide === 'bottom') pendingCellBorders.borderBottomWidth = param;
+            else if (pendingBorderSide === 'left') pendingCellBorders.borderLeftWidth = param;
+            else if (pendingBorderSide === 'right') pendingCellBorders.borderRightWidth = param;
+          }
+          break;
+        case 'brdrcf':
+          if (param !== undefined) {
+            if (pendingBorderSide === 'top') pendingCellBorders.borderTopColor = param;
+            else if (pendingBorderSide === 'bottom') pendingCellBorders.borderBottomColor = param;
+            else if (pendingBorderSide === 'left') pendingCellBorders.borderLeftColor = param;
+            else if (pendingBorderSide === 'right') pendingCellBorders.borderRightColor = param;
+          }
+          break;
         case 'clcbpat': if (param !== undefined) pendingCellBorders.bgColor = param; break;
         case 'clvertalc': pendingCellBorders.vertAlign = 'middle'; break;
         case 'clvertalb': pendingCellBorders.vertAlign = 'bottom'; break;
         case 'clvertalt': pendingCellBorders.vertAlign = 'top'; break;
+        case 'clmgf': pendingCellBorders.mergeFirst = true; pendingCellBorders.merged = false; break;
+        case 'clmrg': pendingCellBorders.merged = true; pendingCellBorders.mergeFirst = false; break;
+        case 'clpadt': if (param !== undefined) pendingCellBorders.padTop = param; break;
+        case 'clpadr': if (param !== undefined) pendingCellBorders.padRight = param; break;
+        case 'clpadb': if (param !== undefined) pendingCellBorders.padBottom = param; break;
+        case 'clpadl': if (param !== undefined) pendingCellBorders.padLeft = param; break;
+        case 'clpadft': case 'clpadfr': case 'clpadfb': case 'clpadfl': break; // padding format flags, ignore
+        case 'cltxlrtb': case 'cltxbtlr': break; // cell text flow direction, ignore
 
         case 'cellx':
           if (param !== undefined) {
@@ -217,21 +289,52 @@ export function rtfToHtml(rtf: string): string {
               borderBottom: pendingCellBorders.borderBottom || false,
               borderLeft: pendingCellBorders.borderLeft || false,
               borderRight: pendingCellBorders.borderRight || false,
-              borderWidth: pendingCellBorders.borderWidth || 0,
-              borderColor: pendingCellBorders.borderColor || 0,
+              borderTopStyle: pendingCellBorders.borderTopStyle || 'solid',
+              borderBottomStyle: pendingCellBorders.borderBottomStyle || 'solid',
+              borderLeftStyle: pendingCellBorders.borderLeftStyle || 'solid',
+              borderRightStyle: pendingCellBorders.borderRightStyle || 'solid',
+              borderTopWidth: pendingCellBorders.borderTopWidth || 0,
+              borderBottomWidth: pendingCellBorders.borderBottomWidth || 0,
+              borderLeftWidth: pendingCellBorders.borderLeftWidth || 0,
+              borderRightWidth: pendingCellBorders.borderRightWidth || 0,
+              borderTopColor: pendingCellBorders.borderTopColor || 0,
+              borderBottomColor: pendingCellBorders.borderBottomColor || 0,
+              borderLeftColor: pendingCellBorders.borderLeftColor || 0,
+              borderRightColor: pendingCellBorders.borderRightColor || 0,
               bgColor: pendingCellBorders.bgColor || 0,
               vertAlign: pendingCellBorders.vertAlign || 'top',
               rightEdge: param,
+              merged: pendingCellBorders.merged || false,
+              mergeFirst: pendingCellBorders.mergeFirst || false,
+              padTop: pendingCellBorders.padTop || 0,
+              padRight: pendingCellBorders.padRight || 0,
+              padBottom: pendingCellBorders.padBottom || 0,
+              padLeft: pendingCellBorders.padLeft || 0,
             });
             pendingCellBorders = {};
+            pendingBorderSide = null;
           }
           break;
 
         case 'intbl': break;
 
         case 'cell':
+          // Emit empty cell if cell was never opened
+          if (inTable && !inCell && !inMergedCell) {
+            if (!inRow) { html += '<tr>'; inRow = true; }
+            while (cellIndex < cellDefs.length && cellDefs[cellIndex].merged) { cellIndex++; }
+            const grid2 = tableGrids.get(tableStartRow);
+            const cs2 = computeCellColspan(cellDefs, cellIndex, grid2);
+            html += buildTdOpen(cellDefs, cellIndex, state, colors, cs2);
+            inCell = true;
+          }
           if (inCell) { html += '</td>'; inCell = false; }
+          inMergedCell = false;
           cellIndex++;
+          // Check if the next raw cell is a merged continuation — suppress its content
+          if (cellIndex < cellDefs.length && cellDefs[cellIndex].merged) {
+            inMergedCell = true;
+          }
           break;
 
         case 'row':
@@ -239,6 +342,7 @@ export function rtfToHtml(rtf: string): string {
           if (inRow) { html += '</tr>'; }
           inRow = false;
           cellIndex = 0;
+          inMergedCell = false;
           rowCounter++;
           break;
 
@@ -266,10 +370,18 @@ export function rtfToHtml(rtf: string): string {
       continue;
     }
 
+    // Suppress text in merged continuation cells
+    if (inMergedCell) continue;
+
     // Start cell if needed
     if (inTable && !inCell) {
       if (!inRow) { html += '<tr>'; inRow = true; }
-      const colspan = getColspan(cellDefs, cellIndex, maxCols.get(tableStartRow) || 1);
+      // Skip merged continuation cells
+      while (cellIndex < cellDefs.length && cellDefs[cellIndex].merged) {
+        cellIndex++;
+      }
+      const grid = tableGrids.get(tableStartRow);
+      const colspan = computeCellColspan(cellDefs, cellIndex, grid);
       html += buildTdOpen(cellDefs, cellIndex, state, colors, colspan);
       inCell = true;
     }
@@ -287,6 +399,8 @@ export function rtfToHtml(rtf: string): string {
     if (state.backColor > 0 && state.backColor < colors.length) styles.push(`background-color:${colors[state.backColor]}`);
     const fontName = fonts.get(state.fontIndex);
     if (fontName) styles.push(`font-family:'${fontName}',serif`);
+    if (state.leftIndent > 0) styles.push(`margin-left:${(state.leftIndent / 1440).toFixed(3)}in`);
+    if (state.firstIndent !== 0) styles.push(`text-indent:${(state.firstIndent / 1440).toFixed(3)}in`);
 
     let text = escapeHtml(tok);
     if (state.superscript) text = `<sup>${text}</sup>`;
@@ -306,13 +420,12 @@ export function rtfToHtml(rtf: string): string {
   return html;
 }
 
-/** First pass: collect number of cells per row and group rows into tables */
-interface RowInfo { numCells: number; tableIndex: number; }
+/** First pass: collect cell edge positions per row and group rows into tables */
+interface RowInfo { edges: number[]; tableIndex: number; }
 
 function collectRowInfo(tokens: string[]): RowInfo[] {
   const rows: RowInfo[] = [];
-  let cellCount = 0;
-  let inTableDef = false;
+  let edges: number[] = [];
   let tableIndex = 0;
   let wasInTable = false;
   let skipDepth = 0;
@@ -351,13 +464,11 @@ function collectRowInfo(tokens: string[]): RowInfo[] {
 
     if (word === 'trowd') {
       if (!wasInTable) { tableIndex = rows.length; wasInTable = true; }
-      cellCount = 0;
-      inTableDef = true;
-    } else if (word === 'cellx') {
-      cellCount++;
+      edges = [];
+    } else if (word === 'cellx' && param !== undefined) {
+      edges.push(param);
     } else if (word === 'row') {
-      rows.push({ numCells: cellCount, tableIndex });
-      inTableDef = false;
+      rows.push({ edges: [...edges], tableIndex });
     } else if (word === 'page') {
       wasInTable = false;
     }
@@ -365,23 +476,44 @@ function collectRowInfo(tokens: string[]): RowInfo[] {
   return rows;
 }
 
-/** Compute max columns per table (keyed by first row index of that table) */
-function computeMaxCols(rowInfos: RowInfo[]): Map<number, number> {
-  const tableMaxCols = new Map<number, number>();
+/** Build sorted unique column grid edges per table, and compute max grid columns */
+function computeTableGrids(rowInfos: RowInfo[]): { grids: Map<number, number[]>; maxCols: Map<number, number> } {
+  const edgeSets = new Map<number, Set<number>>();
   for (const ri of rowInfos) {
-    const cur = tableMaxCols.get(ri.tableIndex) || 0;
-    if (ri.numCells > cur) tableMaxCols.set(ri.tableIndex, ri.numCells);
+    let s = edgeSets.get(ri.tableIndex);
+    if (!s) { s = new Set(); edgeSets.set(ri.tableIndex, s); }
+    for (const e of ri.edges) s.add(e);
   }
-  return tableMaxCols;
+  const grids = new Map<number, number[]>();
+  const maxCols = new Map<number, number>();
+  for (const [ti, s] of edgeSets) {
+    const sorted = [...s].sort((a, b) => a - b);
+    grids.set(ti, sorted);
+    maxCols.set(ti, sorted.length);
+  }
+  return { grids, maxCols };
 }
 
-function getColspan(cellDefs: CellDef[], cellIndex: number, maxCols: number): number {
-  if (cellDefs.length >= maxCols || cellDefs.length <= 1) return cellIndex === 0 && cellDefs.length < maxCols && cellDefs.length === 1 ? maxCols : 1;
-  // Only apply colspan to the last cell if row has fewer cells than max
-  if (cellIndex === cellDefs.length - 1 && cellDefs.length < maxCols) {
-    return maxCols - cellDefs.length + 1;
+function computeCellColspan(cellDefs: CellDef[], cellIndex: number, grid: number[] | undefined): number {
+  if (cellIndex >= cellDefs.length || !grid || grid.length === 0) return 1;
+  const def = cellDefs[cellIndex];
+  const leftEdge = cellIndex > 0 ? cellDefs[cellIndex - 1].rightEdge : 0;
+  // For merged-first cells, include continuation cells' edges
+  let rightEdge = def.rightEdge;
+  if (def.mergeFirst) {
+    for (let j = cellIndex + 1; j < cellDefs.length; j++) {
+      if (cellDefs[j].merged) rightEdge = cellDefs[j].rightEdge;
+      else break;
+    }
   }
-  return 1;
+  // Count grid columns this cell spans
+  let startCol = grid.indexOf(leftEdge) + 1; // grid column after leftEdge; if leftEdge=0, start at 0
+  if (leftEdge === 0) startCol = 0;
+  else if (startCol === 0) startCol = 0; // leftEdge not in grid, start at 0
+  let endCol = grid.indexOf(rightEdge);
+  if (endCol < 0) endCol = grid.length - 1;
+  const span = endCol - startCol + 1;
+  return span > 1 ? span : 1;
 }
 
 function buildTdOpen(cellDefs: CellDef[], cellIndex: number, state: RtfState, colors: string[], colspan: number): string {
@@ -391,12 +523,18 @@ function buildTdOpen(cellDefs: CellDef[], cellIndex: number, state: RtfState, co
     const prevEdge = cellIndex > 0 ? cellDefs[cellIndex - 1].rightEdge : 0;
     const widthTwips = def.rightEdge - prevEdge;
     if (colspan <= 1) styles.push(`width:${(widthTwips / 1440).toFixed(2)}in`);
-    if (def.borderTop) styles.push(`border-top:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
-    if (def.borderBottom) styles.push(`border-bottom:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
-    if (def.borderLeft) styles.push(`border-left:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
-    if (def.borderRight) styles.push(`border-right:${Math.max(1, def.borderWidth / 10)}px solid ${colors[def.borderColor] || '#000'}`);
+    if (def.borderTop) styles.push(`border-top:${Math.max(1, def.borderTopWidth / 10)}px ${def.borderTopStyle || 'solid'} ${colors[def.borderTopColor] || '#000'}`);
+    if (def.borderBottom) styles.push(`border-bottom:${Math.max(1, def.borderBottomWidth / 10)}px ${def.borderBottomStyle || 'solid'} ${colors[def.borderBottomColor] || '#000'}`);
+    if (def.borderLeft) styles.push(`border-left:${Math.max(1, def.borderLeftWidth / 10)}px ${def.borderLeftStyle || 'solid'} ${colors[def.borderLeftColor] || '#000'}`);
+    if (def.borderRight) styles.push(`border-right:${Math.max(1, def.borderRightWidth / 10)}px ${def.borderRightStyle || 'solid'} ${colors[def.borderRightColor] || '#000'}`);
     if (def.bgColor > 0 && def.bgColor < colors.length) styles.push(`background-color:${colors[def.bgColor]}`);
     styles.push(`vertical-align:${def.vertAlign}`);
+    const pad: string[] = [];
+    if (def.padTop) pad.push(`${(def.padTop / 1440 * 72).toFixed(0)}px`); else pad.push('2px');
+    if (def.padRight) pad.push(`${(def.padRight / 1440 * 72).toFixed(0)}px`); else pad.push('6px');
+    if (def.padBottom) pad.push(`${(def.padBottom / 1440 * 72).toFixed(0)}px`); else pad.push('2px');
+    if (def.padLeft) pad.push(`${(def.padLeft / 1440 * 72).toFixed(0)}px`); else pad.push('6px');
+    if (def.padTop || def.padRight || def.padBottom || def.padLeft) styles.push(`padding:${pad.join(' ')}`);
   }
   styles.push(`text-align:${state.align}`);
   const colspanAttr = colspan > 1 ? ` colspan="${colspan}"` : '';
