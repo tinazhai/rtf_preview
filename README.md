@@ -1,33 +1,41 @@
-# RTF Preview
+# RTF Live Preview
 
-Lightweight VS Code / Positron extension to preview RTF files with full formatting and embedded images.
+Preview RTF files directly in VS Code or Positron with full formatting, tables, and embedded images.
 
-## Requirements
+## Features
 
-One of the following must be installed:
-- **LibreOffice** (preferred — best fidelity for SAS RTF output)
-- **pandoc** (fallback)
+- **Zero dependencies required** — works out of the box with a built-in RTF parser
+- **Enhanced rendering** — automatically uses LibreOffice or pandoc if installed for higher fidelity
+- Tables with borders, column widths, cell backgrounds, and alignment
+- Embedded PNG/JPEG images displayed inline
+- Font styling (bold, italic, underline, superscript)
+- Page break indicators
+- Auto-reloads on file change
+- Optimized for SAS-generated RTF output
 
 ## Usage
 
 1. Open any `.rtf` file
 2. Click the preview icon in the editor title bar, or right-click → **RTF: Open Preview**
-3. The preview opens in a side panel with full formatting
+3. The preview opens in a side panel
 
-## Features
+## Rendering Modes
 
-- High-fidelity rendering via LibreOffice conversion
-- Embedded PNG/JPEG images displayed inline
-- Table formatting preserved (borders, column widths, cell backgrounds)
-- Auto-reloads on file change
-- Falls back to pandoc if LibreOffice is unavailable
+The extension automatically selects the best available renderer:
 
-## Build
+| Priority | Renderer | Quality | Requirement |
+|----------|----------|---------|-------------|
+| 1 | LibreOffice | Best | `soffice` in PATH |
+| 2 | pandoc | Good | `pandoc` in PATH |
+| 3 | Built-in parser | Good | None (always available) |
+
+## Build from Source
 
 ```bash
-cd rtf-preview
 npm install
 npm run build
 ```
 
-The `out/` directory contains pre-compiled JS — no build step needed to run.
+## License
+
+MIT
